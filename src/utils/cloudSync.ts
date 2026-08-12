@@ -196,7 +196,8 @@ export function subscribeToDesigns(onUpdate: (designs: DesignPreset[]) => void):
       onUpdate(designList);
     },
     (error) => {
-      console.error(`Error in Firestore onSnapshot listener for 'designs' collection:`, error);
+      console.warn(`Firestore onSnapshot listener fallback (using local presets):`, error);
+      onUpdate(defaultPresets);
     }
   );
 
