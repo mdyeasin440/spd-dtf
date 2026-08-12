@@ -25,6 +25,8 @@ import { registerCustomFont } from '../utils/fontLoader';
 import { generateSampleNumberAssets } from '../utils/numberAssetHelper';
 import { generateSampleLetterAssets } from '../utils/letterAssetHelper';
 import { trimTransparentImageCanvas } from '../utils/imageTrimmer';
+import { savePresetToFirestore, deletePresetFromFirestore, syncAllPresetsToFirestore, saveNewDesignToFirestore } from '../utils/cloudSync';
+import { Cloud, CheckCircle2, Loader2 } from 'lucide-react';
 
 interface DatabaseManagerProps {
   presets: DesignPreset[];
@@ -42,6 +44,8 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
   const [editingPreset, setEditingPreset] = useState<DesignPreset | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [uploadFontStatus, setUploadFontStatus] = useState<string>('');
+  const [isSyncingCloud, setIsSyncingCloud] = useState<boolean>(false);
+  const [syncStatusMessage, setSyncStatusMessage] = useState<string>('');
 
   // League filters
   const leagues = ['All', 'La Liga', 'Premier League', 'Serie A', 'Bundesliga', 'Ligue 1', 'MLS', 'International', 'Retro', 'Custom'];
@@ -83,33 +87,80 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
     setIsCreating(true);
   };
 
-  const handleDuplicate = (preset: DesignPreset) => {
+  const handleDuplicate = async (preset: DesignPreset) => {
     const duplicated: DesignPreset = {
       ...preset,
-      id: `preset-copy-${Date.now()}`,
       code: `${preset.code}-COPY`,
       teamName: `${preset.teamName} (Copy)`,
     };
-    setPresets([duplicated, ...presets]);
-  };
-
-  const handleDelete = (id: string) => {
-    if (confirm('Are you sure you want to delete this design preset?')) {
-      setPresets(presets.filter((p) => p.id !== id));
+    try {
+      setIsSyncingCloud(true);
+      setSyncStatusMessage(`Duplicating ${preset.code} and saving to Firestore 'designs' collection...`);
+      await saveNewDesignToFirestore(duplicated);
+      setSyncStatusMessage(`Duplicated design saved directly to Firestore 'designs' collection!`);
+      setTimeout(() => setSyncStatusMessage(''), 4000);
+    } catch (e) {
+      console.error('Error duplicating preset:', e);
+    } finally {
+      setIsSyncingCloud(false);
     }
   };
 
-  const handleSavePreset = (e: React.FormEvent) => {
+  const handleDelete = async (id: string) => {
+    if (confirm('Are you sure you want to delete this design preset?')) {
+      try {
+        await deletePresetFromFirestore(id);
+      } catch (e) {
+        console.error('Error deleting preset from cloud:', e);
+      }
+    }
+  };
+
+  const handleSavePreset = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingPreset) return;
 
-    if (isCreating) {
-      setPresets([editingPreset, ...presets]);
-    } else {
-      setPresets(presets.map((p) => (p.id === editingPreset.id ? editingPreset : p)));
-    }
+    const presetToSave = { ...editingPreset };
+
     setEditingPreset(null);
-    setIsCreating(false);
+
+    // Persist asynchronously directly to Cloud Firestore 'designs' collection
+    try {
+      setSyncStatusMessage(`Saving ${presetToSave.code} directly to Firestore 'designs' collection using addDoc()...`);
+      setIsSyncingCloud(true);
+
+      if (isCreating || presetToSave.id.startsWith('preset-custom-')) {
+        await saveNewDesignToFirestore(presetToSave);
+      } else {
+        await savePresetToFirestore(presetToSave);
+      }
+
+      setSyncStatusMessage(`Design ${presetToSave.code} successfully saved to Firestore 'designs' collection!`);
+      setTimeout(() => setSyncStatusMessage(''), 4000);
+    } catch (err: any) {
+      console.error('Failed to sync saved preset to cloud:', err);
+      setSyncStatusMessage(`Error saving to Firestore: ${err?.message || err}`);
+      setTimeout(() => setSyncStatusMessage(''), 5000);
+    } finally {
+      setIsCreating(false);
+      setIsSyncingCloud(false);
+    }
+  };
+
+  const handleSyncAllToCloud = async () => {
+    try {
+      setIsSyncingCloud(true);
+      setSyncStatusMessage('Uploading all custom fonts, letter assets (A-Z) & number assets (0-9) to Cloud Firestore...');
+      const count = await syncAllPresetsToFirestore(presets);
+      setSyncStatusMessage(`Synced ${count} custom design presets & uploaded assets to Cloud Firestore successfully!`);
+      setTimeout(() => setSyncStatusMessage(''), 5000);
+    } catch (err) {
+      console.error('Sync to cloud error:', err);
+      setSyncStatusMessage('Cloud sync error. Check internet connection.');
+      setTimeout(() => setSyncStatusMessage(''), 5000);
+    } finally {
+      setIsSyncingCloud(false);
+    }
   };
 
   const handleCustomFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -284,6 +335,20 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
 
         <div className="flex flex-wrap items-center gap-2">
           <button
+            onClick={handleSyncAllToCloud}
+            disabled={isSyncingCloud}
+            className="flex items-center space-x-2 px-3.5 py-2 bg-sky-600/20 hover:bg-sky-600/30 text-sky-400 font-bold uppercase tracking-wider text-xs rounded border border-sky-500/40 transition-all shadow-lg"
+            title="Sync all custom presets & uploaded PNG assets (0-9, A-Z) to Cloud Firestore"
+          >
+            {isSyncingCloud ? (
+              <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
+            ) : (
+              <Cloud className="w-4 h-4 text-sky-400" />
+            )}
+            <span>{isSyncingCloud ? 'Syncing...' : 'Sync to Cloud'}</span>
+          </button>
+
+          <button
             onClick={handleCreateNew}
             className="flex items-center space-x-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-bold uppercase tracking-wider text-xs rounded shadow-lg shadow-red-900/20 transition-all"
           >
@@ -305,6 +370,25 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
             <span>Import JSON</span>
             <input type="file" accept=".json" onChange={handleImportJSON} className="hidden" />
           </label>
+        </div>
+      </div>
+
+      {/* Cloud Sync Status Banner */}
+      {syncStatusMessage && (
+        <div className="mb-6 p-3 bg-sky-950/60 border border-sky-500/40 rounded-lg flex items-center space-x-3 text-sky-300 text-xs font-mono animate-fade-in shadow-lg">
+          <CheckCircle2 className="w-4 h-4 text-sky-400 shrink-0" />
+          <span>{syncStatusMessage}</span>
+        </div>
+      )}
+
+      {/* Cloud Persistence Active Badge info */}
+      <div className="mb-6 p-3 bg-emerald-950/30 border border-emerald-500/30 rounded-lg flex items-center justify-between text-xs font-mono text-emerald-400">
+        <div className="flex items-center space-x-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+          <span className="font-bold">Cloud Persistence Active (Firestore & Cloudinary):</span>
+          <span className="text-zinc-300 hidden sm:inline">
+            Uploaded 0-9 number PNGs, A-Z letter PNGs, and custom font presets are safely preserved in the cloud across all browsers and locations.
+          </span>
         </div>
       </div>
 

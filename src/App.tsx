@@ -4,7 +4,9 @@ import { DatabaseManager } from './components/DatabaseManager';
 import { BulkInputSection } from './components/BulkInputSection';
 import { CanvasEngine } from './components/CanvasEngine';
 import { ExportModal } from './components/ExportModal';
+import { CloudinaryUploader } from './components/CloudinaryUploader';
 import { getFullPresetDatabase } from './data/presets';
+import { subscribeToDesigns } from './utils/cloudSync';
 import { CanvasItem, DesignPreset, LayoutSettings, OrderItem, RollMetrics } from './types';
 import { generateAutoNestingLayout, parseBulkInput } from './utils/nestingEngine';
 
@@ -36,7 +38,18 @@ export default function App() {
     }
   }, [presets]);
 
-  const [activeTab, setActiveTab] = useState<'bulk' | 'canvas' | 'database' | 'export'>('bulk');
+  // Fetch and display all saved designs from Firestore in real-time using onSnapshot()
+  useEffect(() => {
+    const unsubscribe = subscribeToDesigns((realtimeDesigns) => {
+      if (realtimeDesigns && realtimeDesigns.length > 0) {
+        setPresets(realtimeDesigns);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  const [activeTab, setActiveTab] = useState<'bulk' | 'canvas' | 'database' | 'export' | 'cloudinary'>('bulk');
 
   // Bulk Input State
   const [rawText, setRawText] = useState<string>(
@@ -159,6 +172,12 @@ BRAZIL 2002, RONALDINHO, 11, Adult`
             metrics={metrics}
             orders={parsedOrders}
           />
+        )}
+
+        {activeTab === 'cloudinary' && (
+          <div className="p-6">
+            <CloudinaryUploader />
+          </div>
         )}
       </main>
 
