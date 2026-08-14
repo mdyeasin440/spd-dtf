@@ -60,7 +60,9 @@ export async function fetchPresetsFromD1(): Promise<DesignPreset[]> {
 /**
  * Saves or updates a single design preset to Cloudflare D1 backend
  */
-export async function savePresetToD1(preset: DesignPreset): Promise<{ success: boolean; preset?: DesignPreset; error?: string }> {
+export async function savePresetToD1(
+  preset: DesignPreset
+): Promise<{ success: boolean; preset?: DesignPreset; error?: string }> {
   try {
     const res = await fetch('/api/presets', {
       method: 'POST',
@@ -92,8 +94,8 @@ export async function savePresetsToD1(
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const presetsArray = Array.isArray(presets) ? presets : [presets];
-    
-    // Save each preset to D1 backend
+
+    // Save each preset to D1 backend via API
     await Promise.all(
       presetsArray.map((preset) =>
         fetch('/api/presets', {
@@ -121,7 +123,9 @@ export async function savePresetsToD1(
 /**
  * Deletes a design preset from Cloudflare D1 backend
  */
-export async function deletePresetFromD1(presetId: string): Promise<{ success: boolean; error?: string }> {
+export async function deletePresetFromD1(
+  presetId: string
+): Promise<{ success: boolean; error?: string }> {
   try {
     const res = await fetch(`/api/presets/${encodeURIComponent(presetId)}`, {
       method: 'DELETE',
@@ -142,7 +146,9 @@ export async function deletePresetFromD1(presetId: string): Promise<{ success: b
 /**
  * Saves parsed orders to Cloudflare D1 backend
  */
-export async function saveOrdersToD1(orders: OrderItem[]): Promise<{ success: boolean; error?: string }> {
+export async function saveOrdersToD1(
+  orders: OrderItem[]
+): Promise<{ success: boolean; error?: string }> {
   try {
     const res = await fetch('/api/orders/bulk', {
       method: 'POST',
