@@ -2,17 +2,14 @@ name = "spd-dtf"
 compatibility_date = "2026-03-01"
 main = "src/worker.ts"
 
-# Static site build assets
 [site]
 bucket = "./dist"
 
-# Cloudflare D1 Database Binding
 [[d1_databases]]
 binding = "MY_DB"
 database_name = "spideydtf"
 database_id = "d85fd385-d742-1a58-e875-749d7724b37b"
 
-# Cloudflare R2 Bucket Binding
 [[r2_buckets]]
 binding = "MY_BUCKET"
 bucket_name = "spidery-assets"
