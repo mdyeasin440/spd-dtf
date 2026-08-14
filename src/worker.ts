@@ -1,10 +1,13 @@
 /**
  * Cloudflare Worker Handler for Spidey Jersey DTF Pro
- * Integrates with Cloudflare D1 database (Binding: env.MY_DB)
+ * Integrates with:
+ *  - Cloudflare D1 database (Binding: env.MY_DB)
+ *  - Cloudflare R2 bucket (Binding: env.MY_BUCKET) for asset uploads & storage
  */
 
 export interface Env {
   MY_DB: D1Database;
+  MY_BUCKET?: R2Bucket;
 }
 
 export interface D1Database {
@@ -30,6 +33,62 @@ export interface D1Result<T = unknown> {
 export interface D1ExecResult {
   count: number;
   duration: number;
+}
+
+export interface R2Bucket {
+  get(key: string): Promise<R2ObjectBody | null>;
+  put(key: string, value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob, options?: R2PutOptions): Promise<R2Object>;
+  delete(keys: string | string[]): Promise<void>;
+  list(options?: R2ListOptions): Promise<R2Objects>;
+}
+
+export interface R2Object {
+  key: string;
+  version: string;
+  size: number;
+  etag: string;
+  httpEtag: string;
+  uploaded: Date;
+  httpMetadata?: {
+    contentType?: string;
+    contentLanguage?: string;
+    contentDisposition?: string;
+    cacheControl?: string;
+  };
+  customMetadata?: Record<string, string>;
+}
+
+export interface R2ObjectBody extends R2Object {
+  body: ReadableStream;
+  bodyUsed: boolean;
+  arrayBuffer(): Promise<ArrayBuffer>;
+  text(): Promise<string>;
+  json<T>(): Promise<T>;
+  blob(): Promise<Blob>;
+}
+
+export interface R2PutOptions {
+  httpMetadata?: {
+    contentType?: string;
+    contentLanguage?: string;
+    contentDisposition?: string;
+    cacheControl?: string;
+  };
+  customMetadata?: Record<string, string>;
+}
+
+export interface R2ListOptions {
+  limit?: number;
+  prefix?: string;
+  cursor?: string;
+  delimiter?: string;
+}
+
+export interface R2Objects {
+  objects: R2Object[];
+  truncated: boolean;
+  cursor?: string;
+  delimitedPrefixes: string[];
 }
 
 // Utility: JSON Response
@@ -131,13 +190,144 @@ export default {
       if (path === '/api/health' && method === 'GET') {
         return jsonResponse({
           status: 'ok',
-          service: 'Spidey Jersey DTF API (Cloudflare D1)',
+          service: 'Spidey Jersey DTF API (Cloudflare D1 & R2)',
           database: 'spd-dtf (MY_DB)',
+          storageBucket: env.MY_BUCKET ? 'spidery-assets (MY_BUCKET)' : 'unbound',
           timestamp: new Date().toISOString(),
         });
       }
 
-      // 2. GET /api/presets - Fetch all presets from D1
+      // ==========================================
+      // CLOUDFLARE R2 ASSET STORAGE ENDPOINTS
+      // ==========================================
+
+      // 2. GET /api/assets/list - List assets in R2 bucket
+      if (path === '/api/assets/list' && method === 'GET') {
+        if (!env.MY_BUCKET) {
+          return jsonResponse({ success: false, error: 'R2 bucket MY_BUCKET is not bound' }, 500);
+        }
+        const prefix = url.searchParams.get('prefix') || '';
+        const limit = Number(url.searchParams.get('limit') || 100);
+        const listed = await env.MY_BUCKET.list({ prefix, limit });
+
+        const items = listed.objects.map((obj) => ({
+          key: obj.key,
+          size: obj.size,
+          uploaded: obj.uploaded,
+          url: `/api/assets/file/${encodeURIComponent(obj.key)}`,
+        }));
+
+        return jsonResponse({ success: true, count: items.length, assets: items });
+      }
+
+      // 3. GET /api/assets/file/:key - Stream file directly from R2 bucket
+      if (path.startsWith('/api/assets/file/') && method === 'GET') {
+        if (!env.MY_BUCKET) {
+          return jsonResponse({ success: false, error: 'R2 bucket MY_BUCKET is not bound' }, 500);
+        }
+        const key = decodeURIComponent(path.replace('/api/assets/file/', ''));
+        if (!key) {
+          return jsonResponse({ success: false, error: 'File key is required' }, 400);
+        }
+
+        const object = await env.MY_BUCKET.get(key);
+        if (!object) {
+          return jsonResponse({ success: false, error: 'Asset not found in R2' }, 404);
+        }
+
+        const headers = new Headers();
+        headers.set('Access-Control-Allow-Origin', '*');
+        headers.set('etag', object.httpEtag);
+        headers.set('Cache-Control', 'public, max-age=31536000');
+        if (object.httpMetadata?.contentType) {
+          headers.set('Content-Type', object.httpMetadata.contentType);
+        } else if (key.endsWith('.svg')) {
+          headers.set('Content-Type', 'image/svg+xml');
+        } else if (key.endsWith('.png')) {
+          headers.set('Content-Type', 'image/png');
+        } else if (key.endsWith('.ttf')) {
+          headers.set('Content-Type', 'font/ttf');
+        } else if (key.endsWith('.otf')) {
+          headers.set('Content-Type', 'font/otf');
+        } else if (key.endsWith('.woff2')) {
+          headers.set('Content-Type', 'font/woff2');
+        } else {
+          headers.set('Content-Type', 'application/octet-stream');
+        }
+
+        return new Response(object.body, { headers });
+      }
+
+      // 4. POST /api/assets/upload - Upload file to R2 bucket
+      if (path === '/api/assets/upload' && method === 'POST') {
+        if (!env.MY_BUCKET) {
+          return jsonResponse({ success: false, error: 'R2 bucket MY_BUCKET is not bound' }, 500);
+        }
+
+        const contentType = request.headers.get('content-type') || '';
+        let key = url.searchParams.get('key') || '';
+        let fileData: ArrayBuffer | null = null;
+        let mimeType = 'application/octet-stream';
+
+        if (contentType.includes('application/json')) {
+          const body: any = await request.json();
+          key = key || body.key || `asset-${Date.now()}-${body.filename || 'file'}`;
+          mimeType = body.contentType || 'application/octet-stream';
+
+          if (body.dataUrl) {
+            // Base64 dataURL handling
+            const base64Data = body.dataUrl.split(',')[1] || body.dataUrl;
+            const binaryString = atob(base64Data);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
+            fileData = bytes.buffer;
+          } else if (body.content) {
+            fileData = new TextEncoder().encode(body.content).buffer;
+          }
+        } else {
+          // Direct binary upload or multipart
+          key = key || `asset-${Date.now()}`;
+          fileData = await request.arrayBuffer();
+          mimeType = contentType;
+        }
+
+        if (!fileData) {
+          return jsonResponse({ success: false, error: 'No file data received' }, 400);
+        }
+
+        await env.MY_BUCKET.put(key, fileData, {
+          httpMetadata: { contentType: mimeType },
+        });
+
+        return jsonResponse({
+          success: true,
+          message: 'Asset uploaded to Cloudflare R2',
+          key,
+          url: `/api/assets/file/${encodeURIComponent(key)}`,
+        });
+      }
+
+      // 5. DELETE /api/assets/file/:key - Delete file from R2
+      if (path.startsWith('/api/assets/file/') && method === 'DELETE') {
+        if (!env.MY_BUCKET) {
+          return jsonResponse({ success: false, error: 'R2 bucket MY_BUCKET is not bound' }, 500);
+        }
+        const key = decodeURIComponent(path.replace('/api/assets/file/', ''));
+        if (!key) {
+          return jsonResponse({ success: false, error: 'File key is required' }, 400);
+        }
+
+        await env.MY_BUCKET.delete(key);
+        return jsonResponse({ success: true, message: `Asset ${key} deleted from R2` });
+      }
+
+      // ==========================================
+      // CLOUDFLARE D1 DATABASE ENDPOINTS
+      // ==========================================
+
+      // 6. GET /api/presets - Fetch all presets from D1
       if (path === '/api/presets' && method === 'GET') {
         const { results } = await env.MY_DB.prepare(
           `SELECT * FROM design_presets ORDER BY updatedAt DESC`
@@ -154,7 +344,7 @@ export default {
         return jsonResponse({ success: true, presets: formatted, count: formatted.length });
       }
 
-      // 3. POST /api/presets - Save single or array of presets
+      // 7. POST /api/presets - Save single or array of presets
       if (path === '/api/presets' && method === 'POST') {
         const body: any = await request.json();
         if (!body) {
@@ -195,7 +385,7 @@ export default {
         });
       }
 
-      // 4. DELETE /api/presets/:id
+      // 8. DELETE /api/presets/:id
       if (path.startsWith('/api/presets/') && method === 'DELETE') {
         const id = path.split('/')[3];
         if (!id) {
@@ -206,7 +396,7 @@ export default {
         return jsonResponse({ success: true, message: 'Preset deleted from Cloudflare D1' });
       }
 
-      // 5. POST /api/orders/bulk - Save parsed orders
+      // 9. POST /api/orders/bulk - Save parsed orders
       if (path === '/api/orders/bulk' && method === 'POST') {
         const { orders } = (await request.json()) as { orders: any[] };
         if (!Array.isArray(orders) || orders.length === 0) {

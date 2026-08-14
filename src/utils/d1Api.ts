@@ -188,3 +188,60 @@ export async function saveOrdersToD1(
     return { success: false, error: err.message };
   }
 }
+
+/**
+ * Upload an asset file (SVG, PNG, TTF font, etc.) to Cloudflare R2 bucket
+ */
+export async function uploadAssetToR2(
+  key: string,
+  dataUrlOrBinary: string | ArrayBuffer,
+  contentType?: string
+): Promise<{ success: boolean; url?: string; key?: string; error?: string }> {
+  try {
+    const isDataUrl = typeof dataUrlOrBinary === 'string';
+    let res: Response;
+
+    if (isDataUrl) {
+      res = await fetch('/api/assets/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, dataUrl: dataUrlOrBinary, contentType }),
+      });
+    } else {
+      res = await fetch(`/api/assets/upload?key=${encodeURIComponent(key)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': contentType || 'application/octet-stream' },
+        body: dataUrlOrBinary,
+      });
+    }
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || `Upload failed with status ${res.status}`);
+    }
+
+    const data = await res.json();
+    return { success: true, url: data.url, key: data.key };
+  } catch (err: any) {
+    console.warn('Cloudflare R2 upload error:', err);
+    return { success: false, error: err.message || 'Failed to upload asset to R2' };
+  }
+}
+
+/**
+ * List all assets currently stored in the R2 bucket
+ */
+export async function listR2Assets(prefix = ''): Promise<{ success: boolean; assets: Array<{ key: string; size: number; url: string }> }> {
+  try {
+    const res = await fetch(`/api/assets/list?prefix=${encodeURIComponent(prefix)}`);
+    if (!res.ok) {
+      throw new Error(`HTTP error ${res.status}`);
+    }
+    const data = await res.json();
+    return { success: true, assets: data.assets || [] };
+  } catch (err: any) {
+    console.warn('Failed to list R2 assets:', err);
+    return { success: false, assets: [] };
+  }
+}
+
