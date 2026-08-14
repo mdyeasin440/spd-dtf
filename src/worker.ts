@@ -32,6 +32,7 @@ export interface D1ExecResult {
   duration: number;
 }
 
+// Utility: JSON Response
 function jsonResponse(data: any, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -113,6 +114,7 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
+    // Handle CORS Preflight
     if (method === 'OPTIONS') {
       return new Response(null, {
         status: 204,
@@ -125,6 +127,7 @@ export default {
     }
 
     try {
+      // 1. Health check
       if (path === '/api/health' && method === 'GET') {
         return jsonResponse({
           status: 'ok',
@@ -134,6 +137,7 @@ export default {
         });
       }
 
+      // 2. GET /api/presets - Fetch all presets from D1
       if (path === '/api/presets' && method === 'GET') {
         const { results } = await env.MY_DB.prepare(
           `SELECT * FROM design_presets ORDER BY updatedAt DESC`
@@ -150,12 +154,14 @@ export default {
         return jsonResponse({ success: true, presets: formatted, count: formatted.length });
       }
 
+      // 3. POST /api/presets - Save single or array of presets
       if (path === '/api/presets' && method === 'POST') {
         const body: any = await request.json();
         if (!body) {
           return jsonResponse({ success: false, error: 'Request body is required' }, 400);
         }
 
+        // Handle batch array
         if (Array.isArray(body)) {
           if (body.length === 0) {
             return jsonResponse({ success: true, count: 0, presets: [] });
@@ -169,6 +175,7 @@ export default {
           });
         }
 
+        // Handle single preset
         if (!body.code) {
           return jsonResponse({ success: false, error: 'Preset code is required' }, 400);
         }
@@ -188,6 +195,7 @@ export default {
         });
       }
 
+      // 4. DELETE /api/presets/:id
       if (path.startsWith('/api/presets/') && method === 'DELETE') {
         const id = path.split('/')[3];
         if (!id) {
@@ -196,6 +204,46 @@ export default {
 
         await env.MY_DB.prepare(`DELETE FROM design_presets WHERE id = ?`).bind(id).run();
         return jsonResponse({ success: true, message: 'Preset deleted from Cloudflare D1' });
+      }
+
+      // 5. POST /api/orders/bulk - Save parsed orders
+      if (path === '/api/orders/bulk' && method === 'POST') {
+        const { orders } = (await request.json()) as { orders: any[] };
+        if (!Array.isArray(orders) || orders.length === 0) {
+          return jsonResponse({ success: false, error: 'No orders provided' }, 400);
+        }
+
+        const statements = orders.map((ord) => {
+          const id = ord.id || `ord-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+          const orderNumber = ord.orderNumber || '';
+          const customerName = ord.customerName || '';
+          const jerseyName = ord.jerseyName || customerName;
+          const jerseyNumber = ord.number || ord.jerseyNumber || '';
+          const garmentSize = ord.garmentSize || 'Adult';
+          const designCode = ord.designCode || '';
+          const quantity = Number(ord.quantity || 1);
+          const nameWidthInches = Number(ord.nameWidthInches || 12);
+          const nameHeightInches = Number(ord.nameHeightInches || 2.2);
+          const numberHeightInches = Number(ord.numberHeightInches || 9.5);
+          const numberWidthInches = Number(ord.numberWidthInches || 6);
+          const status = ord.status || 'pending';
+          const createdAt = new Date().toISOString();
+
+          return env.MY_DB.prepare(
+            `INSERT OR REPLACE INTO orders (
+              id, orderNumber, customerName, jerseyName, jerseyNumber, garmentSize,
+              designCode, quantity, nameWidthInches, nameHeightInches, numberHeightInches,
+              numberWidthInches, status, createdAt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            id, orderNumber, customerName, jerseyName, jerseyNumber, garmentSize,
+            designCode, quantity, nameWidthInches, nameHeightInches, numberHeightInches,
+            numberWidthInches, status, createdAt
+          );
+        });
+
+        await env.MY_DB.batch(statements);
+        return jsonResponse({ success: true, message: `${orders.length} orders saved to Cloudflare D1` });
       }
 
       return jsonResponse({ error: 'Not Found' }, 404);
