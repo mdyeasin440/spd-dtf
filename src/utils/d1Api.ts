@@ -63,7 +63,8 @@ export async function fetchPresetsFromD1(): Promise<DesignPreset[]> {
   return getLocalPresets();
 }
 
-export async function savePresetToD1(preset: DesignPreset): Promise<any> {
+// Updated function name to match App.tsx import (savePresetsToD1)
+export async function savePresetsToD1(preset: DesignPreset): Promise<any> {
   try {
     const res = await fetch('/api/presets', {
       method: 'POST',
