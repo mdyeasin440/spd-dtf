@@ -53,7 +53,7 @@ BRAZIL 2002, RONALDINHO, 11, Adult`
 
   const [layoutSettings, setLayoutSettings] = useState<LayoutSettings>({
     rollWidthInches: 39.0,
-    marginInches: 0.10,
+    marginInches: 0.10, // Minimal, safe 1-2mm cut spacing
     nestingStrategy: 'compact',
     packingMode: 'row_by_row_structured',
     showCutLines: true,
@@ -84,6 +84,7 @@ BRAZIL 2002, RONALDINHO, 11, Adult`
     const initialOrders = parseBulkInput(rawText, presetsMap);
     setParsedOrders(initialOrders);
 
+    // Initial Layout Generation
     if (initialOrders.length > 0) {
       const result = generateAutoNestingLayout(initialOrders, layoutSettings);
       setCanvasItems(result.items);
@@ -99,7 +100,7 @@ BRAZIL 2002, RONALDINHO, 11, Adult`
     setMetrics(result.metrics);
     setActiveTab('canvas');
 
-    // Sync orders with Cloudflare D1
+    // Async sync orders with Cloudflare D1
     saveOrdersToD1(ordersToProcess);
   };
 
