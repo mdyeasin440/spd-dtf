@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 
-// In-memory backing for Node / Express development server
+// In-memory / persistent backing for Node / Express development mode
 const inMemoryPresets: Map<string, any> = new Map();
 const inMemoryOrders: Map<string, any> = new Map();
 
@@ -21,7 +21,7 @@ async function startServer() {
     next();
   });
 
-  // Body parser with 50mb payload limits for embedded font/image data URLs
+  // Body parser with 50mb payload limits for custom fonts/PNG data URLs
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
