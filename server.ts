@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 
-// In-memory / local storage backing for development mode
+// In-memory backing for Node / Express development server
 const inMemoryPresets: Map<string, any> = new Map();
 const inMemoryOrders: Map<string, any> = new Map();
 
@@ -10,7 +10,18 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // JSON and URL-encoded body parser supporting font/image data URLs
+  // CORS Middleware
+  app.use((_req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    if (_req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    next();
+  });
+
+  // Body parser with 50mb payload limits for embedded font/image data URLs
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -24,7 +35,7 @@ async function startServer() {
     });
   });
 
-  // 2. GET /api/presets - Retrieve all presets
+  // 2. GET /api/presets - Retrieve all presets from storage
   app.get('/api/presets', (_req, res) => {
     const presetsList = Array.from(inMemoryPresets.values()).sort((a, b) => {
       return (b.updatedAt || '').localeCompare(a.updatedAt || '');
@@ -37,11 +48,40 @@ async function startServer() {
     });
   });
 
-  // 3. POST /api/presets - Save or update design preset
+  // 3. POST /api/presets - Save or update design preset (supports single object or batch array)
   app.post('/api/presets', (req, res) => {
     try {
       const body = req.body;
-      if (!body || !body.code) {
+      if (!body) {
+        return res.status(400).json({ success: false, error: 'Request body is required' });
+      }
+
+      // Handle batch array of presets
+      if (Array.isArray(body)) {
+        const savedPresets = [];
+        for (const item of body) {
+          if (item && item.code) {
+            const id = item.id || `preset-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+            const preset = {
+              ...item,
+              id,
+              code: (item.code || '').trim().toUpperCase(),
+              updatedAt: new Date().toISOString(),
+            };
+            inMemoryPresets.set(id, preset);
+            savedPresets.push(preset);
+          }
+        }
+        return res.json({
+          success: true,
+          message: `${savedPresets.length} presets saved successfully`,
+          count: savedPresets.length,
+          presets: savedPresets,
+        });
+      }
+
+      // Handle single preset object
+      if (!body.code) {
         return res.status(400).json({ success: false, error: 'Preset code is required' });
       }
 
@@ -57,7 +97,7 @@ async function startServer() {
 
       return res.json({
         success: true,
-        message: 'Preset saved successfully',
+        message: 'Preset saved successfully to database',
         preset,
       });
     } catch (err: any) {
@@ -74,7 +114,7 @@ async function startServer() {
     }
 
     inMemoryPresets.delete(id);
-    return res.json({ success: true, message: 'Preset deleted' });
+    return res.json({ success: true, message: 'Preset deleted from database' });
   });
 
   // 5. POST /api/orders/bulk - Save parsed orders batch
