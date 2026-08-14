@@ -1,42 +1,133 @@
-export default {
-  async fetch(request: Request, env: any) {
-    const url = new URL(request.url);
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    };
+import express from 'express';
+import path from 'path';
+import { createServer as createViteServer } from 'vite';
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
-    }
+// In-memory / local storage backing for development mode
+const inMemoryPresets: Map<string, any> = new Map();
+const inMemoryOrders: Map<string, any> = new Map();
 
-    if (url.pathname === "/api/presets" && request.method === "GET") {
-      try {
-        const { results } = await env.MY_DB.prepare("SELECT * FROM design_presets ORDER BY id DESC").run();
-        return new Response(JSON.stringify(results), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-      } catch (error: any) {
-        return new Response(JSON.stringify({ success: false, error: error.message }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  // JSON and URL-encoded body parser supporting font/image data URLs
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+  // 1. Health check endpoint
+  app.get('/api/health', (_req, res) => {
+    res.json({
+      status: 'ok',
+      service: 'Spidey Jersey DTF API (Cloudflare D1 Compatible)',
+      database: 'spd-dtf (MY_DB)',
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // 2. GET /api/presets - Retrieve all presets
+  app.get('/api/presets', (_req, res) => {
+    const presetsList = Array.from(inMemoryPresets.values()).sort((a, b) => {
+      return (b.updatedAt || '').localeCompare(a.updatedAt || '');
+    });
+
+    res.json({
+      success: true,
+      presets: presetsList,
+      count: presetsList.length,
+    });
+  });
+
+  // 3. POST /api/presets - Save or update design preset
+  app.post('/api/presets', (req, res) => {
+    try {
+      const body = req.body;
+      if (!body || !body.code) {
+        return res.status(400).json({ success: false, error: 'Preset code is required' });
       }
+
+      const id = body.id || `preset-${Date.now()}`;
+      const preset = {
+        ...body,
+        id,
+        code: (body.code || '').trim().toUpperCase(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      inMemoryPresets.set(id, preset);
+
+      return res.json({
+        success: true,
+        message: 'Preset saved successfully',
+        preset,
+      });
+    } catch (err: any) {
+      console.error('Save preset error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Internal Server Error' });
+    }
+  });
+
+  // 4. DELETE /api/presets/:id - Remove design preset
+  app.delete('/api/presets/:id', (req, res) => {
+    const id = req.params.id;
+    if (!id) {
+      return res.status(400).json({ success: false, error: 'Preset ID is required' });
     }
 
-    if (url.pathname === "/api/presets" && request.method === "POST") {
-      try {
-        const body = await request.json();
-        const { design_code, preset_data } = body;
-        
-        await env.MY_DB.prepare(
-          "INSERT INTO design_presets (design_code, preset_data) VALUES (?, ?)"
-        )
-        .bind(design_code, JSON.stringify(preset_data))
-        .run();
+    inMemoryPresets.delete(id);
+    return res.json({ success: true, message: 'Preset deleted' });
+  });
 
-        return new Response(JSON.stringify({ success: true, message: "Preset saved successfully!" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-      } catch (error: any) {
-        return new Response(JSON.stringify({ success: false, error: error.message }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  // 5. POST /api/orders/bulk - Save parsed orders batch
+  app.post('/api/orders/bulk', (req, res) => {
+    try {
+      const { orders } = req.body;
+      if (!Array.isArray(orders) || orders.length === 0) {
+        return res.status(400).json({ success: false, error: 'No orders provided' });
       }
-    }
 
-    return new Response("Not Found", { status: 404 });
+      for (const ord of orders) {
+        const id = ord.id || `ord-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+        inMemoryOrders.set(id, {
+          ...ord,
+          id,
+          createdAt: new Date().toISOString(),
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: `${orders.length} orders saved`,
+        count: orders.length,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || 'Internal Server Error' });
+    }
+  });
+
+  // 6. GET /api/orders - Get recent orders
+  app.get('/api/orders', (_req, res) => {
+    const ordersList = Array.from(inMemoryOrders.values());
+    res.json({ success: true, orders: ordersList });
+  });
+
+  // Vite development middleware vs Static Production
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
   }
-};
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Spidey Jersey DTF Server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();
