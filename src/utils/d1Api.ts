@@ -47,9 +47,33 @@ export async function fetchPresetsFromD1(): Promise<DesignPreset[]> {
       throw new Error(`HTTP error ${res.status}`);
     }
     const data = await res.json();
-    if (data.success && Array.isArray(data.presets) && data.presets.length > 0) {
-      saveLocalPresets(data.presets);
-      return data.presets;
+    
+    // Handle both direct array response or structured object response
+    let rawPresets = [];
+    if (Array.isArray(data)) {
+      rawPresets = data;
+    } else if (data.success && Array.isArray(data.presets)) {
+      rawPresets = data.presets;
+    } else if (data.results && Array.isArray(data.results)) {
+      rawPresets = data.results;
+    }
+
+    if (rawPresets.length > 0) {
+      const parsedPresets = rawPresets.map((row: any) => {
+        try {
+          if (typeof row.preset_data === 'string') {
+            return JSON.parse(row.preset_data);
+          }
+          return row.preset_data || row;
+        } catch (e) {
+          return null;
+        }
+      }).filter(Boolean);
+
+      if (parsedPresets.length > 0) {
+        saveLocalPresets(parsedPresets);
+        return parsedPresets;
+      }
     }
   } catch (err) {
     console.warn('Cloudflare D1 fetch error, using local cached presets:', err);
@@ -67,7 +91,10 @@ export async function savePresetToD1(preset: DesignPreset): Promise<{ success: b
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(preset),
+      body: JSON.stringify({
+        design_code: preset.code,
+        preset_data: preset
+      }),
     });
 
     if (!res.ok) {
