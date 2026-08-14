@@ -6,15 +6,13 @@ import { CanvasEngine } from './components/CanvasEngine';
 import { ExportModal } from './components/ExportModal';
 import { CanvasItem, DesignPreset, LayoutSettings, OrderItem, RollMetrics } from './types';
 import { generateAutoNestingLayout, parseBulkInput } from './utils/nestingEngine';
-import { getLocalPresets, saveLocalPresets, fetchPresetsFromD1, saveOrdersToD1 } from './utils/d1Api';
+import { getLocalPresets, saveLocalPresets, fetchPresetsFromD1, savePresetsToD1, saveOrdersToD1 } from './utils/d1Api';
 
 export default function App() {
-  // Load Presets from Local Storage or default preset database
   const [presets, setPresets] = useState<DesignPreset[]>(() => {
     return getLocalPresets();
   });
 
-  // Fetch updated presets from Cloudflare D1 on initial mount
   useEffect(() => {
     let isMounted = true;
     fetchPresetsFromD1().then((d1Presets) => {
@@ -27,14 +25,18 @@ export default function App() {
     };
   }, []);
 
-  // Save Presets to Local Storage whenever updated
   useEffect(() => {
     saveLocalPresets(presets);
+    // Automatically sync presets to Cloudflare D1 when updated
+    if (presets && presets.length > 0) {
+      presets.forEach((preset) => {
+        savePresetsToD1(preset.code, preset);
+      });
+    }
   }, [presets]);
 
   const [activeTab, setActiveTab] = useState<'bulk' | 'canvas' | 'database' | 'export'>('bulk');
 
-  // Bulk Input State
   const [rawText, setRawText] = useState<string>(
     `SJ-Y5EMT, KAKA, 22
 SJ-S6NGQ, MESSI, 10
@@ -53,7 +55,7 @@ BRAZIL 2002, RONALDINHO, 11, Adult`
 
   const [layoutSettings, setLayoutSettings] = useState<LayoutSettings>({
     rollWidthInches: 39.0,
-    marginInches: 0.10, // Minimal, safe 1-2mm cut spacing
+    marginInches: 0.10,
     nestingStrategy: 'compact',
     packingMode: 'row_by_row_structured',
     showCutLines: true,
@@ -78,35 +80,29 @@ BRAZIL 2002, RONALDINHO, 11, Adult`
     estimatedFilmCostUSD: 4.32,
   });
 
-  // Initial parse on mount
   useEffect(() => {
     const presetsMap = new Map<string, DesignPreset>(presets.map((p) => [p.code.toUpperCase(), p]));
     const initialOrders = parseBulkInput(rawText, presetsMap);
     setParsedOrders(initialOrders);
 
-    // Initial Layout Generation
     if (initialOrders.length > 0) {
       const result = generateAutoNestingLayout(initialOrders, layoutSettings);
       setCanvasItems(result.items);
       setMetrics(result.metrics);
     }
-  }, []);
+  }, [presets]);
 
-  // Process & Generate 39" Roll Layout
   const handleGenerateLayout = (ordersToProcess: OrderItem[]) => {
-    const presetsMap = new Map<string, DesignPreset>(presets.map((p) => [p.code.toUpperCase(), p]));
     const result = generateAutoNestingLayout(ordersToProcess, layoutSettings);
     setCanvasItems(result.items);
     setMetrics(result.metrics);
     setActiveTab('canvas');
 
-    // Async sync orders with Cloudflare D1
     saveOrdersToD1(ordersToProcess);
   };
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-200 flex flex-col font-sans selection:bg-blue-600 selection:text-white">
-      {/* Top Header & Navigation */}
       <Header
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -115,7 +111,6 @@ BRAZIL 2002, RONALDINHO, 11, Adult`
         presetsCount={presets.length}
       />
 
-      {/* Main Content Area */}
       <main className="flex-1">
         {activeTab === 'bulk' && (
           <BulkInputSection
@@ -161,7 +156,6 @@ BRAZIL 2002, RONALDINHO, 11, Adult`
         )}
       </main>
 
-      {/* Footer */}
       <footer className="border-t border-zinc-800 bg-zinc-900/80 py-4 px-6 text-center text-xs text-zinc-500 font-mono">
         <span>SPIDEY JERSEY DTF Print Automation System • 39 Inch Roll Engine • Cloudflare D1 (spd-dtf) • 300 DPI High Resolution Export</span>
       </footer>
