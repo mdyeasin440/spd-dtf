@@ -4,52 +4,35 @@ import { DatabaseManager } from './components/DatabaseManager';
 import { BulkInputSection } from './components/BulkInputSection';
 import { CanvasEngine } from './components/CanvasEngine';
 import { ExportModal } from './components/ExportModal';
-import { CloudinaryUploader } from './components/CloudinaryUploader';
-import { getFullPresetDatabase } from './data/presets';
-import { subscribeToDesigns } from './utils/cloudSync';
 import { CanvasItem, DesignPreset, LayoutSettings, OrderItem, RollMetrics } from './types';
 import { generateAutoNestingLayout, parseBulkInput } from './utils/nestingEngine';
-
-const STORAGE_KEY_PRESETS = 'spidey_jersey_presets_v2';
+import { getLocalPresets, saveLocalPresets, fetchPresetsFromD1, saveOrdersToD1 } from './utils/d1Api';
 
 export default function App() {
   // Load Presets from Local Storage or default preset database
   const [presets, setPresets] = useState<DesignPreset[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY_PRESETS);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      }
-    } catch (e) {
-      console.error('Failed to load presets from local storage', e);
-    }
-    return getFullPresetDatabase();
+    return getLocalPresets();
   });
+
+  // Fetch updated presets from Cloudflare D1 on initial mount
+  useEffect(() => {
+    let isMounted = true;
+    fetchPresetsFromD1().then((d1Presets) => {
+      if (isMounted && d1Presets && d1Presets.length > 0) {
+        setPresets(d1Presets);
+      }
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Save Presets to Local Storage whenever updated
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY_PRESETS, JSON.stringify(presets));
-    } catch (e) {
-      console.error('Failed to save presets to local storage', e);
-    }
+    saveLocalPresets(presets);
   }, [presets]);
 
-  // Fetch and display all saved designs from Firestore in real-time using onSnapshot()
-  useEffect(() => {
-    const unsubscribe = subscribeToDesigns((realtimeDesigns) => {
-      if (realtimeDesigns && realtimeDesigns.length > 0) {
-        setPresets(realtimeDesigns);
-      }
-    });
-
-    return () => unsubscribe();
-  }, []);
-
-  const [activeTab, setActiveTab] = useState<'bulk' | 'canvas' | 'database' | 'export' | 'cloudinary'>('bulk');
+  const [activeTab, setActiveTab] = useState<'bulk' | 'canvas' | 'database' | 'export'>('bulk');
 
   // Bulk Input State
   const [rawText, setRawText] = useState<string>(
@@ -116,6 +99,9 @@ BRAZIL 2002, RONALDINHO, 11, Adult`
     setCanvasItems(result.items);
     setMetrics(result.metrics);
     setActiveTab('canvas');
+
+    // Async sync orders with Cloudflare D1
+    saveOrdersToD1(ordersToProcess);
   };
 
   return (
@@ -173,17 +159,11 @@ BRAZIL 2002, RONALDINHO, 11, Adult`
             orders={parsedOrders}
           />
         )}
-
-        {activeTab === 'cloudinary' && (
-          <div className="p-6">
-            <CloudinaryUploader />
-          </div>
-        )}
       </main>
 
-      {/* Subtle Footer */}
+      {/* Footer */}
       <footer className="border-t border-zinc-800 bg-zinc-900/80 py-4 px-6 text-center text-xs text-zinc-500 font-mono">
-        <span>SPIDEY JERSEY DTF Print Automation System • 39 Inch Roll Engine • 300 DPI High Resolution Export</span>
+        <span>SPIDEY JERSEY DTF Print Automation System • 39 Inch Roll Engine • Cloudflare D1 (spd-dtf) • 300 DPI High Resolution Export</span>
       </footer>
     </div>
   );

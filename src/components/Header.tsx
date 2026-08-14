@@ -8,13 +8,12 @@ import {
   Ruler,
   Percent,
   Clock,
-  Cloud,
 } from 'lucide-react';
 import { RollMetrics } from '../types';
 
 interface HeaderProps {
-  activeTab: 'bulk' | 'canvas' | 'database' | 'export' | 'cloudinary';
-  setActiveTab: (tab: 'bulk' | 'canvas' | 'database' | 'export' | 'cloudinary') => void;
+  activeTab: 'bulk' | 'canvas' | 'database' | 'export';
+  setActiveTab: (tab: 'bulk' | 'canvas' | 'database' | 'export') => void;
   metrics: RollMetrics;
   ordersCount: number;
   presetsCount: number;
@@ -110,18 +109,6 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <Download className="w-4 h-4" />
               <span>Export DTF File</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('cloudinary')}
-              className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
-                activeTab === 'cloudinary'
-                  ? 'bg-sky-600 text-white shadow-lg shadow-sky-900/30'
-                  : 'text-sky-400 hover:text-white hover:bg-zinc-800/80'
-              }`}
-            >
-              <Cloud className="w-4 h-4" />
-              <span>Cloudinary SDK</span>
             </button>
           </nav>
 

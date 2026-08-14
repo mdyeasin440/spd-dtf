@@ -2,12 +2,9 @@ import React, { useState } from 'react';
 import {
   Search,
   Plus,
-  Upload,
   Edit2,
   Trash2,
   Copy,
-  Download,
-  FileJson,
   Check,
   X,
   Type,
@@ -18,15 +15,14 @@ import {
   Info,
   Image as ImageIcon,
   FileImage,
-  RefreshCw,
+  CheckCircle2,
 } from 'lucide-react';
 import { DesignPreset } from '../types';
 import { registerCustomFont } from '../utils/fontLoader';
 import { generateSampleNumberAssets } from '../utils/numberAssetHelper';
 import { generateSampleLetterAssets } from '../utils/letterAssetHelper';
 import { trimTransparentImageCanvas } from '../utils/imageTrimmer';
-import { savePresetToFirestore, deletePresetFromFirestore, syncAllPresetsToFirestore, saveNewDesignToFirestore } from '../utils/cloudSync';
-import { Cloud, CheckCircle2, Loader2 } from 'lucide-react';
+import { savePresetToD1, deletePresetFromD1, saveLocalPresets } from '../utils/d1Api';
 
 interface DatabaseManagerProps {
   presets: DesignPreset[];
@@ -44,8 +40,7 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
   const [editingPreset, setEditingPreset] = useState<DesignPreset | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [uploadFontStatus, setUploadFontStatus] = useState<string>('');
-  const [isSyncingCloud, setIsSyncingCloud] = useState<boolean>(false);
-  const [syncStatusMessage, setSyncStatusMessage] = useState<string>('');
+  const [statusMessage, setStatusMessage] = useState<string>('');
 
   // League filters
   const leagues = ['All', 'La Liga', 'Premier League', 'Serie A', 'Bundesliga', 'Ligue 1', 'MLS', 'International', 'Retro', 'Custom'];
@@ -65,7 +60,7 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
       code: `SJ-CUSTOM-${Math.floor(100 + Math.random() * 900)}`,
       teamName: 'Custom Team',
       league: 'Custom',
-      season: '2023-24',
+      season: '2024-25',
       fontFamily: 'Oswald',
       textColor: '#FFFFFF',
       strokeColor: '#000000',
@@ -90,29 +85,40 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
   const handleDuplicate = async (preset: DesignPreset) => {
     const duplicated: DesignPreset = {
       ...preset,
+      id: `preset-copy-${Date.now()}`,
       code: `${preset.code}-COPY`,
       teamName: `${preset.teamName} (Copy)`,
+      updatedAt: new Date().toISOString(),
     };
-    try {
-      setIsSyncingCloud(true);
-      setSyncStatusMessage(`Duplicating ${preset.code} and saving to Firestore 'designs' collection...`);
-      await saveNewDesignToFirestore(duplicated);
-      setSyncStatusMessage(`Duplicated design saved directly to Firestore 'designs' collection!`);
-      setTimeout(() => setSyncStatusMessage(''), 4000);
-    } catch (e) {
-      console.error('Error duplicating preset:', e);
-    } finally {
-      setIsSyncingCloud(false);
-    }
+
+    // Immediate local state update
+    setPresets((prev) => {
+      const updated = [duplicated, ...prev];
+      saveLocalPresets(updated);
+      return updated;
+    });
+
+    setStatusMessage(`Duplicated preset "${duplicated.code}" created successfully!`);
+    setTimeout(() => setStatusMessage(''), 4000);
+
+    // Sync to Cloudflare D1
+    await savePresetToD1(duplicated);
   };
 
-  const handleDelete = async (id: string) => {
-    if (confirm('Are you sure you want to delete this design preset?')) {
-      try {
-        await deletePresetFromFirestore(id);
-      } catch (e) {
-        console.error('Error deleting preset from cloud:', e);
-      }
+  const handleDelete = async (id: string, code: string) => {
+    if (window.confirm(`Are you sure you want to delete preset "${code}"?`)) {
+      // Immediate local state update
+      setPresets((prev) => {
+        const updated = prev.filter((p) => p.id !== id);
+        saveLocalPresets(updated);
+        return updated;
+      });
+
+      setStatusMessage(`Preset "${code}" removed.`);
+      setTimeout(() => setStatusMessage(''), 4000);
+
+      // Sync deletion to Cloudflare D1
+      await deletePresetFromD1(id);
     }
   };
 
@@ -120,46 +126,40 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
     e.preventDefault();
     if (!editingPreset) return;
 
-    const presetToSave = { ...editingPreset };
+    const presetToSave: DesignPreset = {
+      ...editingPreset,
+      code: (editingPreset.code || '').trim().toUpperCase(),
+      updatedAt: new Date().toISOString(),
+    };
 
-    setEditingPreset(null);
-
-    // Persist asynchronously directly to Cloud Firestore 'designs' collection
-    try {
-      setSyncStatusMessage(`Saving ${presetToSave.code} directly to Firestore 'designs' collection using addDoc()...`);
-      setIsSyncingCloud(true);
-
-      if (isCreating || presetToSave.id.startsWith('preset-custom-')) {
-        await saveNewDesignToFirestore(presetToSave);
+    // Immediate local state update so it is NEVER lost or delayed
+    setPresets((prevPresets) => {
+      const existingIdx = prevPresets.findIndex(
+        (p) => p.id === presetToSave.id || p.code.toUpperCase() === presetToSave.code.toUpperCase()
+      );
+      let updated: DesignPreset[];
+      if (existingIdx >= 0) {
+        updated = [...prevPresets];
+        updated[existingIdx] = presetToSave;
       } else {
-        await savePresetToFirestore(presetToSave);
+        updated = [presetToSave, ...prevPresets];
       }
+      saveLocalPresets(updated);
+      return updated;
+    });
 
-      setSyncStatusMessage(`Design ${presetToSave.code} successfully saved to Firestore 'designs' collection!`);
-      setTimeout(() => setSyncStatusMessage(''), 4000);
-    } catch (err: any) {
-      console.error('Failed to sync saved preset to cloud:', err);
-      setSyncStatusMessage(`Error saving to Firestore: ${err?.message || err}`);
-      setTimeout(() => setSyncStatusMessage(''), 5000);
-    } finally {
-      setIsCreating(false);
-      setIsSyncingCloud(false);
-    }
-  };
+    const savedCode = presetToSave.code;
+    setEditingPreset(null);
+    setIsCreating(false);
 
-  const handleSyncAllToCloud = async () => {
+    setStatusMessage(`Preset "${savedCode}" saved successfully!`);
+    setTimeout(() => setStatusMessage(''), 4000);
+
+    // Sync to Cloudflare D1 database in background
     try {
-      setIsSyncingCloud(true);
-      setSyncStatusMessage('Uploading all custom fonts, letter assets (A-Z) & number assets (0-9) to Cloud Firestore...');
-      const count = await syncAllPresetsToFirestore(presets);
-      setSyncStatusMessage(`Synced ${count} custom design presets & uploaded assets to Cloud Firestore successfully!`);
-      setTimeout(() => setSyncStatusMessage(''), 5000);
+      await savePresetToD1(presetToSave);
     } catch (err) {
-      console.error('Sync to cloud error:', err);
-      setSyncStatusMessage('Cloud sync error. Check internet connection.');
-      setTimeout(() => setSyncStatusMessage(''), 5000);
-    } finally {
-      setIsSyncingCloud(false);
+      console.warn('Background D1 sync notice:', err);
     }
   };
 
@@ -290,107 +290,38 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
     });
   };
 
-  const handleExportJSON = () => {
-    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(presets, null, 2));
-    const downloadAnchor = document.createElement('a');
-    downloadAnchor.setAttribute('href', dataStr);
-    downloadAnchor.setAttribute('download', 'spidey_jersey_presets_database.json');
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    downloadAnchor.remove();
-  };
-
-  const handleImportJSON = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const imported = JSON.parse(event.target?.result as string);
-        if (Array.isArray(imported)) {
-          setPresets(imported);
-          alert(`Successfully imported ${imported.length} design presets!`);
-        }
-      } catch (err) {
-        alert('Invalid JSON database file format.');
-      }
-    };
-    reader.readAsText(file);
-  };
-
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       {/* Top Header Controls */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="text-xl font-bold tracking-tighter text-white uppercase flex items-center space-x-2">
-            <Layers className="w-6 h-6 text-red-500" />
+            <Layers className="w-6 h-6 text-blue-500" />
             <span>Design & Font Management Database</span>
           </h1>
           <p className="text-xs text-zinc-400 font-mono mt-1">
-            Store, map, and edit team fonts, colors, strokes, and vector styles for 100+ football clubs & custom design codes.
+            Store, map, and edit team fonts, colors, strokes, and vector styles for football clubs & custom design codes.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={handleSyncAllToCloud}
-            disabled={isSyncingCloud}
-            className="flex items-center space-x-2 px-3.5 py-2 bg-sky-600/20 hover:bg-sky-600/30 text-sky-400 font-bold uppercase tracking-wider text-xs rounded border border-sky-500/40 transition-all shadow-lg"
-            title="Sync all custom presets & uploaded PNG assets (0-9, A-Z) to Cloud Firestore"
-          >
-            {isSyncingCloud ? (
-              <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
-            ) : (
-              <Cloud className="w-4 h-4 text-sky-400" />
-            )}
-            <span>{isSyncingCloud ? 'Syncing...' : 'Sync to Cloud'}</span>
-          </button>
-
+        <div className="flex items-center space-x-3">
           <button
             onClick={handleCreateNew}
             className="flex items-center space-x-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold uppercase tracking-wider text-xs rounded shadow-lg shadow-blue-900/20 transition-all"
           >
             <Plus className="w-4 h-4" />
-            <span>Add New Design Code</span>
+            <span>+ Add New Design Code</span>
           </button>
-
-          <button
-            onClick={handleExportJSON}
-            className="flex items-center space-x-2 px-3 py-2 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 font-bold uppercase tracking-wider text-xs rounded border border-zinc-800"
-            title="Backup Database to JSON"
-          >
-            <Download className="w-4 h-4 text-emerald-400" />
-            <span>Backup JSON</span>
-          </button>
-
-          <label className="flex items-center space-x-2 px-3 py-2 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 font-bold uppercase tracking-wider text-xs rounded border border-zinc-800 cursor-pointer">
-            <Upload className="w-4 h-4 text-blue-400" />
-            <span>Import JSON</span>
-            <input type="file" accept=".json" onChange={handleImportJSON} className="hidden" />
-          </label>
         </div>
       </div>
 
-      {/* Cloud Sync Status Banner */}
-      {syncStatusMessage && (
-        <div className="mb-6 p-3 bg-sky-950/60 border border-sky-500/40 rounded-lg flex items-center space-x-3 text-sky-300 text-xs font-mono animate-fade-in shadow-lg">
-          <CheckCircle2 className="w-4 h-4 text-sky-400 shrink-0" />
-          <span>{syncStatusMessage}</span>
+      {/* Status Feedback Notification */}
+      {statusMessage && (
+        <div className="mb-6 p-3 bg-blue-950/60 border border-blue-500/40 rounded-lg flex items-center space-x-3 text-blue-300 text-xs font-mono shadow-lg transition-all">
+          <CheckCircle2 className="w-4 h-4 text-blue-400 shrink-0" />
+          <span>{statusMessage}</span>
         </div>
       )}
-
-      {/* Cloud Persistence Active Badge info */}
-      <div className="mb-6 p-3 bg-emerald-950/30 border border-emerald-500/30 rounded-lg flex items-center justify-between text-xs font-mono text-emerald-400">
-        <div className="flex items-center space-x-2">
-          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-          <span className="font-bold">Cloud Persistence Active (Firestore & Cloudinary):</span>
-          <span className="text-zinc-300 hidden sm:inline">
-            Uploaded 0-9 number PNGs, A-Z letter PNGs, and custom font presets are safely preserved in the cloud across all browsers and locations.
-          </span>
-        </div>
-      </div>
 
       {/* Filter and Search Bar */}
       <div className="bg-zinc-900/50 p-4 rounded-xl border border-zinc-800 mb-8 flex flex-col md:flex-row gap-4 justify-between items-center">
@@ -401,7 +332,7 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
             placeholder="Search Design Code, Team, or Season..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full bg-zinc-950 text-white pl-10 pr-4 py-2 rounded-lg border border-zinc-800 focus:border-zinc-600 focus:outline-none text-xs font-mono placeholder:text-zinc-600"
+            className="w-full bg-zinc-950 text-white pl-10 pr-4 py-2 rounded-lg border border-zinc-800 focus:border-blue-500 focus:outline-none text-xs font-mono placeholder:text-zinc-600"
           />
         </div>
 
@@ -449,37 +380,34 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                 <div
                   className="text-center font-black tracking-wide mb-1"
                   style={{
-                    fontFamily: `"${preset.fontFamily}", sans-serif`,
+                    fontFamily: preset.fontFamily,
                     color: preset.textColor,
-                    WebkitTextStroke: `${preset.strokeWidth / 2}px ${preset.strokeColor}`,
-                    fontSize: '22px',
+                    WebkitTextStroke: `${preset.strokeWidth > 0 ? preset.strokeWidth / 2 : 0}px ${preset.strokeColor}`,
+                    fontSize: '20px',
+                    letterSpacing: `${preset.letterSpacing || 2}px`,
                   }}
                 >
-                  {preset.teamName.split(' ')[0]}
+                  RONALDO
                 </div>
 
                 <div
-                  className="font-black text-3xl"
+                  className="text-center font-black"
                   style={{
-                    fontFamily: `"${preset.numberStyle?.fontFamily || preset.fontFamily}", sans-serif`,
+                    fontFamily: preset.numberStyle?.fontFamily || preset.fontFamily,
                     color: preset.numberStyle?.fillColor || preset.textColor,
-                    WebkitTextStroke: `${(preset.numberStyle?.strokeWidth || 6) / 2}px ${preset.numberStyle?.strokeColor || preset.strokeColor}`,
+                    WebkitTextStroke: `${(preset.numberStyle?.strokeWidth || 4) / 2}px ${preset.numberStyle?.strokeColor || preset.strokeColor}`,
+                    fontSize: '44px',
+                    lineHeight: '1',
                   }}
                 >
-                  10
+                  7
                 </div>
-
-                {preset.notes && (
-                  <span className="absolute bottom-1 right-2 text-[9px] text-zinc-600 font-mono italic max-w-[200px] truncate">
-                    {preset.notes}
-                  </span>
-                )}
               </div>
 
-              {/* Attributes breakdown */}
-              <div className="grid grid-cols-2 gap-2 text-xs font-mono text-zinc-400 bg-zinc-950 p-2.5 rounded-lg border border-zinc-800 mb-4">
+              {/* Specs Summary */}
+              <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-zinc-400 border-t border-zinc-800/80 pt-3 mb-4">
                 <div className="flex items-center space-x-1.5">
-                  <div className="w-3 h-3 rounded-full border" style={{ backgroundColor: preset.textColor, borderColor: preset.strokeColor }} />
+                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: preset.textColor }} />
                   <span>Text: {preset.textColor}</span>
                 </div>
                 <div className="flex items-center space-x-1.5">
@@ -487,15 +415,13 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                   <span>
                     {preset.numberAssets && Object.keys(preset.numberAssets).length > 0
                       ? `${Object.keys(preset.numberAssets).length} PNG Assets`
-                      : 'Font Numbers'}
+                      : 'Vector Font'}
                   </span>
                 </div>
-                <div>Name: {preset.defaultNameWidthInches}" x {preset.defaultNameHeightInches}"</div>
-                <div>Num H: {preset.defaultNumberHeightInches}"</div>
               </div>
             </div>
 
-            {/* Actions */}
+            {/* Actions Bar */}
             <div className="flex items-center justify-between pt-3 border-t border-zinc-800">
               <button
                 onClick={() => {
@@ -511,14 +437,14 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
               <div className="flex items-center space-x-2">
                 <button
                   onClick={() => handleDuplicate(preset)}
-                  className="p-1.5 text-zinc-400 hover:text-white bg-zinc-950 hover:bg-zinc-800 rounded border border-zinc-800 transition-all"
+                  className="p-1.5 text-zinc-400 hover:text-white rounded hover:bg-zinc-800"
                   title="Duplicate Preset"
                 >
                   <Copy className="w-3.5 h-3.5" />
                 </button>
                 <button
-                  onClick={() => handleDelete(preset.id)}
-                  className="p-1.5 text-zinc-400 hover:text-red-400 bg-zinc-950 hover:bg-zinc-800 rounded border border-zinc-800 transition-all"
+                  onClick={() => handleDelete(preset.id, preset.code)}
+                  className="p-1.5 text-zinc-500 hover:text-red-400 rounded hover:bg-zinc-800"
                   title="Delete Preset"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -529,7 +455,7 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
         ))}
       </div>
 
-      {/* Edit / Create Modal */}
+      {/* Edit / Create Preset Modal */}
       {editingPreset && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl max-w-2xl w-full p-6 shadow-2xl my-8">
@@ -539,59 +465,74 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                 <span>{isCreating ? 'Create New Design Preset' : `Edit Preset: ${editingPreset.code}`}</span>
               </h2>
               <button
-                onClick={() => setEditingPreset(null)}
-                className="p-1 text-zinc-400 hover:text-white rounded-lg"
+                onClick={() => {
+                  setEditingPreset(null);
+                  setIsCreating(false);
+                }}
+                className="text-zinc-500 hover:text-white"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSavePreset} className="space-y-5">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <form onSubmit={handleSavePreset} className="space-y-4">
+              {/* Top Form Fields */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Design Code *</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    Design Code (Matching Key)
+                  </label>
                   <input
                     type="text"
                     required
                     value={editingPreset.code}
                     onChange={(e) => setEditingPreset({ ...editingPreset, code: e.target.value.toUpperCase() })}
-                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-zinc-600 focus:outline-none text-xs font-mono"
-                    placeholder="e.g. SJ-Y5EMT"
+                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-blue-500 text-xs font-mono"
+                    placeholder="e.g. SJ-Y5EMT or BARCELONA 2016-17"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Team / Style Name *</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    Team Name
+                  </label>
                   <input
                     type="text"
                     required
                     value={editingPreset.teamName}
                     onChange={(e) => setEditingPreset({ ...editingPreset, teamName: e.target.value })}
-                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-zinc-600 focus:outline-none text-xs"
-                    placeholder="e.g. Barcelona 2016"
+                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-blue-500 text-xs font-mono"
+                    placeholder="e.g. AC Milan"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">League / Category</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    League / Category
+                  </label>
                   <select
                     value={editingPreset.league}
                     onChange={(e) => setEditingPreset({ ...editingPreset, league: e.target.value })}
-                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-zinc-600 focus:outline-none text-xs font-mono"
+                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-blue-500 text-xs font-mono"
                   >
-                    {leagues.filter(l => l !== 'All').map(l => (
-                      <option key={l} value={l}>{l}</option>
+                    {leagues.filter((l) => l !== 'All').map((lg) => (
+                      <option key={lg} value={lg}>
+                        {lg}
+                      </option>
                     ))}
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Season</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    Season / Era
+                  </label>
                   <input
                     type="text"
                     value={editingPreset.season}
                     onChange={(e) => setEditingPreset({ ...editingPreset, season: e.target.value })}
-                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-zinc-600 focus:outline-none text-xs font-mono"
+                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-blue-500 text-xs font-mono"
+                    placeholder="e.g. 2024-25 or Classic"
                   />
                 </div>
               </div>
@@ -602,33 +543,24 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                   <Type className="w-4 h-4" />
                   <span>Font Specification & Custom Upload</span>
                 </h3>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-[10px] text-zinc-500 uppercase mb-1">Font Family</label>
-                    <select
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                      Font Family
+                    </label>
+                    <input
+                      type="text"
                       value={editingPreset.fontFamily}
                       onChange={(e) => setEditingPreset({ ...editingPreset, fontFamily: e.target.value })}
-                      className="w-full bg-zinc-900 text-white px-3 py-2 rounded border border-zinc-800 focus:border-zinc-600 focus:outline-none text-xs"
-                    >
-                      <option value="Oswald">Oswald (Premier League style)</option>
-                      <option value="Bebas Neue">Bebas Neue (Tall Classic)</option>
-                      <option value="Anton">Anton (Bold Block)</option>
-                      <option value="Teko">Teko (Modern Narrow)</option>
-                      <option value="Jersey 15">Jersey 15 (Pixel / Digital)</option>
-                      <option value="Montserrat">Montserrat (Clean Sans)</option>
-                      <option value="Orbitron">Orbitron (Sci-Fi / Modern)</option>
-                      <option value="Graduate">Graduate (Collegiate Athletic)</option>
-                      <option value="Rubik Mono One">Rubik Mono One (Heavy Mono)</option>
-                      <option value="Fjalla One">Fjalla One (Display)</option>
-                      {editingPreset.customFontDataUrl && (
-                        <option value={editingPreset.fontFamily}>{editingPreset.fontFamily} (Custom Uploaded)</option>
-                      )}
-                    </select>
+                      className="w-full bg-zinc-900 text-white px-3 py-2 rounded border border-zinc-800 focus:border-blue-500 text-xs font-mono"
+                      placeholder="e.g. Oswald, Bebas Neue, Impact"
+                    />
                   </div>
 
                   <div>
-                    <label className="block text-[10px] text-zinc-500 uppercase mb-1">Upload Custom Font (.ttf / .woff)</label>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                      Upload Custom Font (.ttf / .woff / .otf)
+                    </label>
                     <input
                       type="file"
                       accept=".ttf,.woff,.woff2,.otf"
@@ -637,13 +569,12 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                     />
                   </div>
                 </div>
-
                 {uploadFontStatus && (
-                  <p className="text-xs text-emerald-400 font-mono mt-1">{uploadFontStatus}</p>
+                  <p className="text-[10px] font-mono text-emerald-400 mt-2">{uploadFontStatus}</p>
                 )}
               </div>
 
-              {/* Dedicated Section: Upload Number Assets (0-9) */}
+              {/* Number PNG Asset Grid (0-9) */}
               <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 space-y-3">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-800 pb-3">
                   <div>
@@ -651,11 +582,10 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                       <FileImage className="w-4 h-4" />
                       <span>Upload Number Assets (0-9)</span>
                     </h3>
-                    <p className="text-[10px] text-zinc-400 font-mono mt-0.5">
-                      Upload high-res PNG or vector graphic files for digits 0-9 for this design code.
+                    <p className="text-[10px] text-zinc-500 font-mono">
+                      Optional: Upload high-res transparent PNGs for digits 0-9.
                     </p>
                   </div>
-
                   <div className="flex items-center space-x-2">
                     <button
                       type="button"
@@ -670,7 +600,7 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                       <button
                         type="button"
                         onClick={() => setEditingPreset({ ...editingPreset, numberAssets: {} })}
-                        className="px-2.5 py-1 bg-zinc-900 hover:bg-red-950 text-red-400 text-[10px] font-bold uppercase tracking-wider rounded border border-zinc-800"
+                        className="px-2 py-1 bg-zinc-900 hover:bg-red-950/40 text-zinc-400 hover:text-red-400 text-[10px] font-bold uppercase rounded border border-zinc-800"
                       >
                         Clear All
                       </button>
@@ -678,12 +608,9 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                   </div>
                 </div>
 
-                {/* Grid of 0-9 Upload Slots */}
                 <div className="grid grid-cols-5 sm:grid-cols-10 gap-2 pt-1">
                   {['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => {
-                    const hasAsset = Boolean(editingPreset.numberAssets?.[digit]);
-                    const assetUrl = editingPreset.numberAssets?.[digit];
-
+                    const hasAsset = editingPreset.numberAssets && editingPreset.numberAssets[digit];
                     return (
                       <div
                         key={digit}
@@ -692,18 +619,18 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                         } rounded p-1.5 flex flex-col items-center justify-between min-h-[90px] transition-all`}
                       >
                         <span className="text-[10px] font-mono font-bold text-zinc-400 bg-zinc-950 px-1.5 py-0.2 rounded border border-zinc-800">
-                          #{digit}
+                          {digit}
                         </span>
 
-                        <div className="flex-1 flex items-center justify-center my-1 w-full overflow-hidden">
-                          {hasAsset && assetUrl ? (
+                        <div className="my-1 flex items-center justify-center h-9 w-full">
+                          {hasAsset ? (
                             <img
-                              src={assetUrl}
-                              alt={`Number ${digit}`}
-                              className="max-h-12 max-w-full object-contain"
+                              src={hasAsset}
+                              alt={`Digit ${digit}`}
+                              className="max-h-9 max-w-full object-contain filter drop-shadow"
                             />
                           ) : (
-                            <span className="text-[10px] text-zinc-600 font-mono italic">No PNG</span>
+                            <span className="text-zinc-600 font-mono text-xs font-bold">{digit}</span>
                           )}
                         </div>
 
@@ -712,7 +639,7 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                             {hasAsset ? 'Change' : '+ Upload'}
                             <input
                               type="file"
-                              accept="image/*,.svg"
+                              accept="image/png,image/svg+xml,image/webp"
                               onChange={(e) => handleNumberAssetUpload(digit, e)}
                               className="hidden"
                             />
@@ -722,7 +649,7 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                               type="button"
                               onClick={() => handleClearNumberAsset(digit)}
                               className="text-zinc-500 hover:text-red-400 p-0.5"
-                              title={`Remove asset for digit ${digit}`}
+                              title="Remove graphic"
                             >
                               <X className="w-3 h-3" />
                             </button>
@@ -734,7 +661,7 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                 </div>
               </div>
 
-              {/* Dedicated Section: Upload Letter Assets (A-Z) for Name Stitching */}
+              {/* Letter PNG Asset Grid (A-Z) */}
               <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800 space-y-3">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-800 pb-3">
                   <div>
@@ -742,11 +669,10 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                       <ImageIcon className="w-4 h-4" />
                       <span>Upload Custom Letter PNG Assets (A-Z Dual Mode)</span>
                     </h3>
-                    <p className="text-[10px] text-zinc-400 font-mono mt-0.5">
-                      Upload individual letter PNG graphics (A-Z) for customer name stitching (100% preserves stencil details &amp; no black strokes).
+                    <p className="text-[10px] text-zinc-500 font-mono">
+                      Optional: Upload custom PNG cuts for each letter A-Z.
                     </p>
                   </div>
-
                   <div className="flex items-center space-x-2">
                     <button
                       type="button"
@@ -761,7 +687,7 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                       <button
                         type="button"
                         onClick={() => setEditingPreset({ ...editingPreset, letterAssets: {} })}
-                        className="px-2.5 py-1 bg-zinc-900 hover:bg-red-950 text-red-400 text-[10px] font-bold uppercase tracking-wider rounded border border-zinc-800"
+                        className="px-2 py-1 bg-zinc-900 hover:bg-red-950/40 text-zinc-400 hover:text-red-400 text-[10px] font-bold uppercase rounded border border-zinc-800"
                       >
                         Clear All
                       </button>
@@ -769,12 +695,9 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                   </div>
                 </div>
 
-                {/* Grid of A-Z Upload Slots */}
-                <div className="grid grid-cols-6 sm:grid-cols-9 md:grid-cols-13 gap-1.5 pt-1 max-h-60 overflow-y-auto pr-1">
+                <div className="grid grid-cols-6 sm:grid-cols-13 gap-1.5 max-h-48 overflow-y-auto p-1 bg-zinc-900/40 rounded border border-zinc-800/80">
                   {'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((letter) => {
-                    const hasAsset = Boolean(editingPreset.letterAssets?.[letter]);
-                    const assetUrl = editingPreset.letterAssets?.[letter];
-
+                    const hasAsset = editingPreset.letterAssets && editingPreset.letterAssets[letter];
                     return (
                       <div
                         key={letter}
@@ -786,15 +709,15 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                           {letter}
                         </span>
 
-                        <div className="flex-1 flex items-center justify-center my-1 w-full overflow-hidden">
-                          {hasAsset && assetUrl ? (
+                        <div className="my-0.5 flex items-center justify-center h-6 w-full">
+                          {hasAsset ? (
                             <img
-                              src={assetUrl}
+                              src={hasAsset}
                               alt={`Letter ${letter}`}
-                              className="max-h-8 max-w-full object-contain"
+                              className="max-h-6 max-w-full object-contain filter drop-shadow"
                             />
                           ) : (
-                            <span className="text-[8px] text-zinc-600 font-mono italic">Font</span>
+                            <span className="text-zinc-600 font-mono text-[10px] font-bold">{letter}</span>
                           )}
                         </div>
 
@@ -803,7 +726,7 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                             {hasAsset ? 'Edit' : '+PNG'}
                             <input
                               type="file"
-                              accept="image/*,.svg"
+                              accept="image/png,image/svg+xml,image/webp"
                               onChange={(e) => handleLetterAssetUpload(letter, e)}
                               className="hidden"
                             />
@@ -813,7 +736,6 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                               type="button"
                               onClick={() => handleClearLetterAsset(letter)}
                               className="text-zinc-500 hover:text-red-400 p-0.5"
-                              title={`Remove asset for letter ${letter}`}
                             >
                               <X className="w-2.5 h-2.5" />
                             </button>
@@ -825,69 +747,80 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                 </div>
               </div>
 
-              {/* Name Text Styling Colors & Strokes */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-zinc-950 p-4 rounded-lg border border-zinc-800">
+              {/* Color & Stroke Specifications */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 bg-zinc-950 p-4 rounded-lg border border-zinc-800">
                 <div>
-                  <label className="block text-[10px] font-bold uppercase text-zinc-400 mb-1">Name Text Color</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    Text Fill Color
+                  </label>
                   <div className="flex items-center space-x-2">
                     <input
                       type="color"
                       value={editingPreset.textColor}
                       onChange={(e) => setEditingPreset({ ...editingPreset, textColor: e.target.value })}
-                      className="w-8 h-8 rounded border-0 cursor-pointer bg-transparent"
+                      className="w-8 h-8 rounded border border-zinc-700 bg-transparent cursor-pointer"
                     />
                     <input
                       type="text"
                       value={editingPreset.textColor}
                       onChange={(e) => setEditingPreset({ ...editingPreset, textColor: e.target.value })}
-                      className="w-full bg-zinc-900 text-white px-2 py-1 rounded border border-zinc-800 text-xs font-mono"
+                      className="w-full bg-zinc-900 text-white px-2 py-1.5 rounded border border-zinc-800 text-xs font-mono"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-[10px] font-bold uppercase text-zinc-400 mb-1">Name Stroke Color</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    Outer Stroke Color
+                  </label>
                   <div className="flex items-center space-x-2">
                     <input
                       type="color"
                       value={editingPreset.strokeColor}
                       onChange={(e) => setEditingPreset({ ...editingPreset, strokeColor: e.target.value })}
-                      className="w-8 h-8 rounded border-0 cursor-pointer bg-transparent"
+                      className="w-8 h-8 rounded border border-zinc-700 bg-transparent cursor-pointer"
                     />
                     <input
                       type="text"
                       value={editingPreset.strokeColor}
                       onChange={(e) => setEditingPreset({ ...editingPreset, strokeColor: e.target.value })}
-                      className="w-full bg-zinc-900 text-white px-2 py-1 rounded border border-zinc-800 text-xs font-mono"
+                      className="w-full bg-zinc-900 text-white px-2 py-1.5 rounded border border-zinc-800 text-xs font-mono"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-[10px] font-bold uppercase text-zinc-400 mb-1">Stroke Width (PX)</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    Outer Stroke (PX)
+                  </label>
                   <input
                     type="number"
                     min="0"
                     max="20"
                     value={editingPreset.strokeWidth}
                     onChange={(e) => setEditingPreset({ ...editingPreset, strokeWidth: parseInt(e.target.value) || 0 })}
-                    className="w-full bg-zinc-900 text-white px-2 py-1.5 rounded border border-zinc-800 text-xs font-mono"
+                    className="w-full bg-zinc-900 text-white px-3 py-1.5 rounded border border-zinc-800 text-xs font-mono"
                   />
                 </div>
-              </div>
 
-              {/* Text Effect & Arc Curve Angle */}
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
                 <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Text Style Effect</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    Text Effect
+                  </label>
                   <select
                     value={editingPreset.textEffect}
-                    onChange={(e) => setEditingPreset({ ...editingPreset, textEffect: e.target.value as any })}
-                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-zinc-600 focus:outline-none text-xs font-mono"
+                    onChange={(e) =>
+                      setEditingPreset({
+                        ...editingPreset,
+                        textEffect: e.target.value as any,
+                      })
+                    }
+                    className="w-full bg-zinc-900 text-white px-3 py-1.5 rounded border border-zinc-800 text-xs font-mono"
                   >
-                    <option value="none">Straight</option>
-                    <option value="arc">Curved Arc (Manchester Style)</option>
-                    <option value="stencil">Stencil Cut</option>
+                    <option value="none">Flat (Standard)</option>
+                    <option value="arc">Curved Arc</option>
+                    <option value="italic">Italic Slant</option>
+                    <option value="drop-shadow">Drop Shadow</option>
                   </select>
                 </div>
 
@@ -900,7 +833,6 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                       type="range"
                       min="5"
                       max="45"
-                      step="1"
                       value={editingPreset.arcAmount || 15}
                       onChange={(e) =>
                         setEditingPreset({ ...editingPreset, arcAmount: parseInt(e.target.value) || 15 })
@@ -909,67 +841,91 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({
                     />
                   </div>
                 )}
+              </div>
 
+              {/* Default Dimensions */}
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 bg-zinc-950 p-4 rounded-lg border border-zinc-800">
                 <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Name Width (Inches)</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    Name Width (Inches)
+                  </label>
                   <input
                     type="number"
                     step="0.1"
                     value={editingPreset.defaultNameWidthInches}
-                    onChange={(e) => setEditingPreset({ ...editingPreset, defaultNameWidthInches: parseFloat(e.target.value) || 12 })}
-                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-zinc-600 text-xs font-mono"
+                    onChange={(e) =>
+                      setEditingPreset({ ...editingPreset, defaultNameWidthInches: parseFloat(e.target.value) || 12.0 })
+                    }
+                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-blue-500 text-xs font-mono"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Name Height (Inches)</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    Name Height (Inches)
+                  </label>
                   <input
                     type="number"
                     step="0.1"
                     value={editingPreset.defaultNameHeightInches}
-                    onChange={(e) => setEditingPreset({ ...editingPreset, defaultNameHeightInches: parseFloat(e.target.value) || 2.2 })}
-                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-zinc-600 text-xs font-mono"
+                    onChange={(e) =>
+                      setEditingPreset({ ...editingPreset, defaultNameHeightInches: parseFloat(e.target.value) || 2.2 })
+                    }
+                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-blue-500 text-xs font-mono"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Number Height (Inches)</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    Number Height (Inches)
+                  </label>
                   <input
                     type="number"
                     step="0.1"
                     value={editingPreset.defaultNumberHeightInches}
-                    onChange={(e) => setEditingPreset({ ...editingPreset, defaultNumberHeightInches: parseFloat(e.target.value) || 9.5 })}
-                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-zinc-600 text-xs font-mono"
+                    onChange={(e) =>
+                      setEditingPreset({ ...editingPreset, defaultNumberHeightInches: parseFloat(e.target.value) || 9.5 })
+                    }
+                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-blue-500 text-xs font-mono"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Letter Spacing (Kerning/PX)</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    Letter Spacing (Kerning/PX)
+                  </label>
                   <input
                     type="number"
                     step="0.5"
                     value={typeof editingPreset.letterSpacing === 'number' ? editingPreset.letterSpacing : 3}
-                    onChange={(e) => setEditingPreset({ ...editingPreset, letterSpacing: parseFloat(e.target.value) || 0 })}
-                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-zinc-600 text-xs font-mono"
+                    onChange={(e) =>
+                      setEditingPreset({ ...editingPreset, letterSpacing: parseFloat(e.target.value) || 0 })
+                    }
+                    className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-blue-500 text-xs font-mono"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Notes / Description</label>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                  Notes / Description
+                </label>
                 <input
                   type="text"
                   value={editingPreset.notes || ''}
                   onChange={(e) => setEditingPreset({ ...editingPreset, notes: e.target.value })}
-                  className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-zinc-600 text-xs font-mono placeholder:text-zinc-600"
-                  placeholder="e.g. Official league font specification"
+                  className="w-full bg-zinc-950 text-white px-3 py-2 rounded border border-zinc-800 focus:border-blue-500 text-xs font-mono placeholder:text-zinc-600"
+                  placeholder="e.g. Official club font specification"
                 />
               </div>
 
               <div className="flex items-center justify-end space-x-3 pt-4 border-t border-zinc-800">
                 <button
                   type="button"
-                  onClick={() => setEditingPreset(null)}
+                  onClick={() => {
+                    setEditingPreset(null);
+                    setIsCreating(false);
+                  }}
                   className="px-4 py-2 text-zinc-400 hover:text-white text-xs font-bold uppercase tracking-wider"
                 >
                   Cancel
